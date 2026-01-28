@@ -25,14 +25,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build Python server
-        run: npm run engine:server:build:win
+      - name: Ensure no publish
+        run: echo "ELECTRON_BUILDER_PUBLISH=never" >> $env:GITHUB_ENV
 
-      - name: Build renderer
-        run: npm run build
-
-      - name: Build Windows installer
-        run: npm run dist:win
+      - name: Build Windows package
+        run: npm run package:win
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
