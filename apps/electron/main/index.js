@@ -9,6 +9,125 @@ let mainWindow;
 let engineServerPort = null;
 let engineServerProcess = null;
 let engineServerReady = null;
+let logsDir = null;
+let electronLogStream = null;
+let engineStdioLogStream = null;
+let pendingOpenFilePath = null;
+let isStoppingEngine = false;
+
+const ENGINE_PORT = Number(process.env.PDF2ZH_ENGINE_PORT || 18080);
+const HEALTH_CHECK_TIMEOUT_MS = 300;
+const HEALTH_POLL_INTERVAL_MS = 200;
+const HEALTH_POLL_TOTAL_MS = 10000;
+
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!gotSingleInstanceLock) {
+  app.quit();
+}
+
+function timestamp() {
+  return new Date().toISOString();
+}
+
+function writeMainLog(level, message) {
+  const line = `[${timestamp()}] [${level.toUpperCase()}] ${message}`;
+  if (level === 'error') {
+    console.error(line);
+  } else {
+    console.log(line);
+  }
+  if (electronLogStream) {
+    electronLogStream.write(`${line}\n`);
+  }
+}
+
+function initLogFiles() {
+  logsDir = path.join(app.getPath('userData'), 'logs');
+  fs.mkdirSync(logsDir, { recursive: true });
+  electronLogStream = fs.createWriteStream(path.join(logsDir, 'electron-main.log'), { flags: 'a' });
+  engineStdioLogStream = fs.createWriteStream(path.join(logsDir, 'engine-stdio.log'), { flags: 'a' });
+  writeMainLog('info', `logs dir: ${logsDir}`);
+}
+
+function closeLogFiles() {
+  if (electronLogStream) {
+    electronLogStream.end();
+    electronLogStream = null;
+  }
+  if (engineStdioLogStream) {
+    engineStdioLogStream.end();
+    engineStdioLogStream = null;
+  }
+}
+
+function extractPdfPathFromArgv(argv) {
+  for (const arg of argv) {
+    if (!arg || arg.startsWith('-')) continue;
+    if (!arg.toLowerCase().endsWith('.pdf')) continue;
+    const candidate = path.resolve(arg);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function pushOpenFileToRenderer(filePath) {
+  if (!filePath) return;
+  if (mainWindow && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send('pdf2zh:open-file', filePath);
+    writeMainLog('info', `forwarded open-file to renderer: ${filePath}`);
+    return;
+  }
+  pendingOpenFilePath = filePath;
+}
+
+function sendEngineErrorToRenderer(message, detail) {
+  if (mainWindow && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send('pdf2zh:error', {
+      jobId: null,
+      message,
+      detail
+    });
+  }
+}
+
+function isEngineHealthyPayload(payload) {
+  return payload && payload.status === 'ok' && typeof payload.pid === 'number';
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs) {
+  const abortController = new AbortController();
+  const timer = setTimeout(() => abortController.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: abortController.signal });
+    const text = await response.text();
+    const payload = text ? JSON.parse(text) : {};
+    return { ok: response.ok, payload };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function checkEngineHealth(port, timeoutMs = HEALTH_CHECK_TIMEOUT_MS) {
+  try {
+    const { ok, payload } = await fetchJsonWithTimeout(`http://127.0.0.1:${port}/health`, timeoutMs);
+    return ok && isEngineHealthyPayload(payload);
+  } catch {
+    return false;
+  }
+}
+
+async function waitForEngineHealthy(port, timeoutMs = HEALTH_POLL_TOTAL_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const healthy = await checkEngineHealth(port, HEALTH_CHECK_TIMEOUT_MS);
+    if (healthy) return true;
+    await new Promise((resolve) => setTimeout(resolve, HEALTH_POLL_INTERVAL_MS));
+  }
+  return false;
+}
 
 function createWindow() {
   const isDev = process.env.NODE_ENV === 'development';
@@ -34,16 +153,50 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (pendingOpenFilePath) {
+      pushOpenFileToRenderer(pendingOpenFilePath);
+      pendingOpenFilePath = null;
+    }
+  });
 }
 
-app.whenReady().then(async () => {
-  try {
-    await startEngineServer();
-  } catch (err) {
-    console.error(err);
-  }
-  createWindow();
-});
+if (gotSingleInstanceLock) {
+  app.on('second-instance', (_event, commandLine) => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+    const openFile = extractPdfPathFromArgv(commandLine);
+    if (openFile) {
+      pushOpenFileToRenderer(openFile);
+    }
+  });
+
+  app.on('open-file', (event, filePath) => {
+    event.preventDefault();
+    if (filePath && filePath.toLowerCase().endsWith('.pdf') && fs.existsSync(filePath)) {
+      pushOpenFileToRenderer(path.resolve(filePath));
+    }
+  });
+
+  app.whenReady().then(async () => {
+    initLogFiles();
+    const launchOpenFile = extractPdfPathFromArgv(process.argv.slice(1));
+    if (launchOpenFile) {
+      pendingOpenFilePath = launchOpenFile;
+    }
+    createWindow();
+    try {
+      await startEngineServer();
+    } catch (err) {
+      const detail = err && err.message ? err.message : String(err);
+      writeMainLog('error', `engine startup failed: ${detail}`);
+      sendEngineErrorToRenderer(`引擎服务启动失败，请查看日志目录：${logsDir}`, detail);
+    }
+  });
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
@@ -51,9 +204,12 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   app.isQuitting = true;
-  if (engineServerProcess) {
-    engineServerProcess.kill();
-  }
+  stopEngineServer();
+});
+
+app.on('will-quit', () => {
+  stopEngineServer();
+  closeLogFiles();
 });
 
 app.on('activate', () => {
@@ -82,6 +238,15 @@ function isCommandAvailable(command, args) {
   return result.error.code !== 'ENOENT';
 }
 
+function isUsableCommand(candidatePath, checkArgs) {
+  if (!candidatePath) return false;
+  const hasPathSeparator = candidatePath.includes(path.sep);
+  if (path.isAbsolute(candidatePath) || hasPathSeparator) {
+    return fs.existsSync(candidatePath);
+  }
+  return isCommandAvailable(candidatePath, checkArgs);
+}
+
 function resolvePythonCommand() {
   if (process.platform === 'win32') {
     return isCommandAvailable('python', ['-V']) ? 'python' : null;
@@ -91,16 +256,17 @@ function resolvePythonCommand() {
   return null;
 }
 
-function resolveEngineServerCommand() {
+function resolveEngineServerCommand(port, ppid, logDir) {
   const attempts = [];
   const appPath = app.getAppPath();
   const isDev = process.env.NODE_ENV === 'development';
+  const baseArgs = ['--port', String(port), '--ppid', String(ppid), '--log-dir', logDir];
 
   if (!isDev) {
     const serverExe = path.join(process.resourcesPath, 'engine', 'pdf2zh-engine-server.exe');
     attempts.push(serverExe);
     if (fs.existsSync(serverExe)) {
-      return { command: serverExe, args: [], attempts };
+      return { command: serverExe, args: baseArgs, attempts };
     }
     throw new Error(`未找到可用的 pdf2zh 服务命令。已尝试：${attempts.join(', ')}`);
   }
@@ -110,14 +276,14 @@ function resolveEngineServerCommand() {
     : path.join(appPath, 'engine', '.venv', 'bin', 'python');
   const devPythonCmd = resolvePythonCommand();
   const devCandidates = [
-    { path: venvPython, args: ['-m', 'pdf2zh_engine.server', '--port', '0'] },
-    { path: devPythonCmd, args: ['-m', 'pdf2zh_engine.server', '--port', '0'] }
+    { path: venvPython, args: ['-m', 'pdf2zh_engine.server', ...baseArgs] },
+    { path: devPythonCmd, args: ['-m', 'pdf2zh_engine.server', ...baseArgs] }
   ];
 
   for (const candidate of devCandidates) {
     if (!candidate.path) continue;
     attempts.push(candidate.path);
-    if (fs.existsSync(candidate.path)) {
+    if (isUsableCommand(candidate.path, ['-V'])) {
       return { command: candidate.path, args: candidate.args, attempts };
     }
   }
@@ -125,80 +291,104 @@ function resolveEngineServerCommand() {
   throw new Error(`未找到可用的 pdf2zh 服务命令。已尝试：${attempts.join(', ')}`);
 }
 
-function startEngineServer() {
+function stopEngineServer() {
+  if (!engineServerProcess || isStoppingEngine) return;
+  isStoppingEngine = true;
+  const pid = engineServerProcess.pid;
+  writeMainLog('info', `stopping engine process pid=${pid}`);
+
+  try {
+    if (process.platform === 'win32') {
+      spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    } else {
+      try {
+        process.kill(-pid, 'SIGTERM');
+      } catch {
+        process.kill(pid, 'SIGTERM');
+      }
+      setTimeout(() => {
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
+          try {
+            process.kill(pid, 'SIGKILL');
+          } catch {
+            // noop
+          }
+        }
+      }, 1500);
+    }
+  } catch (err) {
+    writeMainLog('error', `stop engine failed: ${err.message}`);
+  } finally {
+    isStoppingEngine = false;
+    engineServerProcess = null;
+    engineServerPort = null;
+    engineServerReady = null;
+  }
+}
+
+async function startEngineServer() {
   if (engineServerReady) return engineServerReady;
-
-  engineServerReady = new Promise((resolve, reject) => {
-    let resolved = false;
-    let stdoutBuffer = '';
-
-    let command;
-    let args;
-    let stderrBuffer = '';
-    try {
-      const resolvedCommand = resolveEngineServerCommand();
-      command = resolvedCommand.command;
-      args = resolvedCommand.args;
-    } catch (err) {
-      reject(err);
-      return;
+  engineServerReady = (async () => {
+    const healthyBeforeStart = await checkEngineHealth(ENGINE_PORT, HEALTH_CHECK_TIMEOUT_MS);
+    if (healthyBeforeStart) {
+      engineServerPort = ENGINE_PORT;
+      writeMainLog('info', `reusing existing engine on port ${ENGINE_PORT}`);
+      return ENGINE_PORT;
     }
 
-    engineServerProcess = spawn(command, args, { shell: false });
+    const ppid = process.pid;
+    const resolvedCommand = resolveEngineServerCommand(ENGINE_PORT, ppid, logsDir);
+    writeMainLog('info', `starting engine command=${resolvedCommand.command} args=${resolvedCommand.args.join(' ')}`);
 
-    const timeout = setTimeout(() => {
-      if (!resolved) {
-        const message = `引擎服务启动超时（30s）。stderr: ${stderrBuffer.trim().slice(0, 2000) || '(empty)'}`;
-        if (engineServerProcess) {
-          engineServerProcess.kill();
-        }
-        reject(new Error(message));
-      }
-    }, 30000);
+    engineServerProcess = spawn(resolvedCommand.command, resolvedCommand.args, {
+      shell: false,
+      detached: process.platform !== 'win32'
+    });
 
     engineServerProcess.stdout.on('data', (buf) => {
-      stdoutBuffer += buf.toString();
-      let index;
-      while ((index = stdoutBuffer.indexOf('\n')) >= 0) {
-        const line = stdoutBuffer.slice(0, index).trim();
-        stdoutBuffer = stdoutBuffer.slice(index + 1);
-        if (!line) continue;
-        try {
-          const payload = JSON.parse(line);
-          if (payload.type === 'ready') {
-            engineServerPort = payload.port;
-            resolved = true;
-            clearTimeout(timeout);
-            console.log(`[engine] ready on port ${payload.port}`);
-            resolve(payload.port);
-          }
-        } catch {
-          // ignore
-        }
+      const text = buf.toString();
+      if (engineStdioLogStream) {
+        engineStdioLogStream.write(`[${timestamp()}] [STDOUT] ${text}`);
       }
     });
 
     engineServerProcess.stderr.on('data', (buf) => {
       const text = buf.toString();
-      stderrBuffer += text;
-      console.error(text);
+      if (engineStdioLogStream) {
+        engineStdioLogStream.write(`[${timestamp()}] [STDERR] ${text}`);
+      }
     });
 
     engineServerProcess.on('error', (err) => {
-      clearTimeout(timeout);
-      reject(err);
+      writeMainLog('error', `engine process error: ${err.message}`);
     });
 
-    engineServerProcess.on('close', () => {
+    engineServerProcess.on('close', (code, signal) => {
+      writeMainLog('info', `engine process closed code=${code} signal=${signal}`);
       engineServerPort = null;
       engineServerReady = null;
-      if (!app.isQuitting) {
-        startEngineServer().catch((err) => console.error(err));
-      }
+      engineServerProcess = null;
     });
-  });
 
-  return engineServerReady;
+    const healthyAfterStart = await waitForEngineHealthy(ENGINE_PORT, HEALTH_POLL_TOTAL_MS);
+    if (!healthyAfterStart) {
+      stopEngineServer();
+      throw new Error(`引擎服务健康检查超时（10s），请查看日志目录：${logsDir}`);
+    }
+
+    engineServerPort = ENGINE_PORT;
+    writeMainLog('info', `engine is healthy on port ${ENGINE_PORT}`);
+    return ENGINE_PORT;
+  })();
+
+  try {
+    return await engineServerReady;
+  } catch (err) {
+    engineServerReady = null;
+    throw err;
+  }
 }
 
 function fetchJson(url, options) {

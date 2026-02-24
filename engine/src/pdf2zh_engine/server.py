@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import logging
 import os
 import shutil
+import signal
 import sys
 import tempfile
 import threading
@@ -16,6 +18,63 @@ from pathlib import Path
 from typing import Any
 
 from pdf2zh_engine.job import EngineJob
+
+
+LOGGER = logging.getLogger("pdf2zh_engine.server")
+
+
+def setup_logging(log_dir: str | None) -> None:
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    if log_dir:
+        try:
+            Path(log_dir).mkdir(parents=True, exist_ok=True)
+            file_handler = logging.FileHandler(
+                Path(log_dir) / "engine.log", encoding="utf-8"
+            )
+            handlers.append(file_handler)
+        except Exception as exc:
+            sys.stderr.write(f"failed to init file logging at {log_dir}: {exc}\n")
+            sys.stderr.flush()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+
+def pid_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import psutil
+
+            return psutil.pid_exists(pid)
+        except Exception:
+            pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def watch_parent_process(
+    ppid: int, httpd: ThreadingHTTPServer, stop_event: threading.Event
+) -> None:
+    while not stop_event.wait(timeout=1):
+        parent_missing = not pid_exists(ppid)
+        reparented_to_init = os.name != "nt" and ppid != 1 and os.getppid() == 1
+        if parent_missing or reparented_to_init:
+            LOGGER.error("parent process %s not found, shutting down", ppid)
+            httpd.shutdown()
+            return
 
 
 class JobState:
@@ -164,8 +223,8 @@ def _run_job(state: JobState, payload: dict[str, Any]) -> None:
         state.done = True
     except Exception as exc:
         detail = traceback.format_exc()
-        sys.stderr.write(detail + "\n")
-        sys.stderr.flush()
+        LOGGER.error("job failed: %s", exc)
+        LOGGER.error(detail)
         state.error = {"ok": False, "error": str(exc), "detail": detail}
         _emit(state, {"type": "error", "message": str(exc), "detail": detail})
         state.done = True
@@ -222,6 +281,13 @@ class Handler(BaseHTTPRequestHandler):
         self._json_response(HTTPStatus.OK, {"jobId": job_id})
 
     def do_GET(self) -> None:
+        if self.path == "/health":
+            self._json_response(
+                HTTPStatus.OK,
+                {"status": "ok", "pid": os.getpid()},
+            )
+            return
+
         if self.path.startswith("/events"):
             job_id = self._query_param("jobId")
             if not job_id:
@@ -302,13 +368,40 @@ class Handler(BaseHTTPRequestHandler):
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pdf2zh-engine-server")
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--ppid", type=int, default=0)
+    parser.add_argument("--log-dir", type=str, default=None)
     args = parser.parse_args(argv)
+
+    log_dir = args.log_dir or os.getenv("PDF2ZH_LOG_DIR")
+    setup_logging(log_dir)
 
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     port = httpd.server_address[1]
+    stop_event = threading.Event()
+
+    if args.ppid > 0:
+        threading.Thread(
+            target=watch_parent_process,
+            args=(args.ppid, httpd, stop_event),
+            daemon=True,
+        ).start()
+
+    def shutdown_handler(_signum: int, _frame: Any) -> None:
+        LOGGER.info("received termination signal, shutting down")
+        stop_event.set()
+        httpd.shutdown()
+
+    signal.signal(signal.SIGTERM, shutdown_handler)
+
     sys.stdout.write(json.dumps({"type": "ready", "port": port}) + "\n")
     sys.stdout.flush()
-    httpd.serve_forever()
+    LOGGER.info("engine server started on 127.0.0.1:%s ppid=%s", port, args.ppid)
+    try:
+        httpd.serve_forever()
+    finally:
+        stop_event.set()
+        httpd.server_close()
+        LOGGER.info("engine server stopped")
     return 0
 
 

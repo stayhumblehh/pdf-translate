@@ -12,6 +12,7 @@ license = { text = "MIT" }
 dependencies = [
   "pdf2zh_next",
   "pydantic>=2",
+  "psutil>=5.9",
 ]
 
 [project.scripts]

@@ -11,8 +11,19 @@ export const App = () => {
   const [service, setService] = useState<'google' | 'bing'>('google');
   const [jobId, setJobId] = useState<string | null>(null);
   const jobIdRef = useRef<string | null>(null);
+  const isTranslatingRef = useRef(false);
   const [error, setError] = useState('');
   const inputRef = useRef<HTMLInputElement | null>(null);
+
+  const applySelectedFile = (filePath: string) => {
+    resetStateForNewFile();
+    setSelectedFilePath(filePath);
+    const parts = filePath.split(/[\\/]/);
+    const name = parts[parts.length - 1] || filePath;
+    setSourceFileName(name);
+    const stem = name.replace(/\.pdf$/i, '');
+    setOutputFilename(`${stem} (双语).pdf`);
+  };
 
   const resetStateForNewFile = () => {
     setProgressPct(0);
@@ -22,6 +33,10 @@ export const App = () => {
     setOutputFilename('');
     setError('');
   };
+
+  useEffect(() => {
+    isTranslatingRef.current = isTranslating;
+  }, [isTranslating]);
 
   useEffect(() => {
     if (!window.pdf2zh) {
@@ -72,6 +87,10 @@ export const App = () => {
         setError(data.message);
       }
     });
+    window.pdf2zh.onOpenFile((filePath) => {
+      if (!filePath || isTranslatingRef.current) return;
+      applySelectedFile(filePath);
+    });
   }, []);
 
   const selectPDF = async () => {
@@ -79,13 +98,7 @@ export const App = () => {
     if (isTranslating) return;
     const fp = await window.pdf2zh.selectPdf();
     if (fp) {
-      resetStateForNewFile();
-      setSelectedFilePath(fp);
-      const parts = fp.split(/[\\/]/);
-      const name = parts[parts.length - 1] || fp;
-      setSourceFileName(name);
-      const stem = name.replace(/\.pdf$/i, '');
-      setOutputFilename(`${stem} (双语).pdf`);
+      applySelectedFile(fp);
     }
   };
 

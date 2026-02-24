@@ -26,6 +26,7 @@ declare global {
       onError: (
         cb: (data: { jobId: string | null; message: string; detail?: string }) => void
       ) => void;
+      onOpenFile: (cb: (filePath: string) => void) => void;
     };
   }
 }
