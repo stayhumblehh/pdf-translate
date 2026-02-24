@@ -57,7 +57,7 @@
     ],
     "extraResources": [
       {
-        "from": "dist/pdf2zh-engine-server.exe",
+        "from": "dist-engine/pdf2zh-engine-server.exe",
         "to": "engine/pdf2zh-engine-server.exe"
       }
     ]
