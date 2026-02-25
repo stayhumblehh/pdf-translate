@@ -294,11 +294,31 @@ function resolvePythonCommand() {
   return null;
 }
 
+function resolveOfflineAssetsZipPath(isDev, appPath) {
+  const candidates = isDev
+    ? [
+        path.join(appPath, 'dist-engine', 'babeldoc-offline-assets.zip'),
+        path.join(process.cwd(), 'dist-engine', 'babeldoc-offline-assets.zip')
+      ]
+    : [path.join(process.resourcesPath, 'engine', 'babeldoc-offline-assets.zip')];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 function resolveEngineServerCommand(port, ppid, logDir) {
   const attempts = [];
   const appPath = app.getAppPath();
   const isDev = process.env.NODE_ENV === 'development';
   const baseArgs = ['--port', String(port), '--ppid', String(ppid), '--log-dir', logDir];
+  const offlineAssetsZip = resolveOfflineAssetsZipPath(isDev, appPath);
+  if (offlineAssetsZip) {
+    baseArgs.push('--offline-assets-zip', offlineAssetsZip);
+  }
 
   if (!isDev) {
     const serverExe = path.join(process.resourcesPath, 'engine', 'pdf2zh-engine-server.exe');
@@ -382,7 +402,11 @@ async function startEngineServer() {
 
     engineServerProcess = spawn(resolvedCommand.command, resolvedCommand.args, {
       shell: false,
-      detached: process.platform !== 'win32'
+      detached: process.platform !== 'win32',
+      env: {
+        ...process.env,
+        PDF2ZH_ASSET_UPSTREAM: process.env.PDF2ZH_ASSET_UPSTREAM || (process.platform === 'win32' ? 'modelscope' : '')
+      }
     });
 
     engineServerProcess.stdout.on('data', (buf) => {

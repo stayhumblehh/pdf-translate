@@ -1,6 +1,6 @@
 {
   "name": "pdf-translate",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "",
   "main": "apps/electron/main/index.js",
   "scripts": {
@@ -59,6 +59,10 @@
       {
         "from": "dist-engine/pdf2zh-engine-server.exe",
         "to": "engine/pdf2zh-engine-server.exe"
+      },
+      {
+        "from": "dist-engine/babeldoc-offline-assets.zip",
+        "to": "engine/babeldoc-offline-assets.zip"
       }
     ]
   },

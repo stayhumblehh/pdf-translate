@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import os
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Callable
@@ -11,6 +12,36 @@ from pdf2zh_next.config.translate_engine_model import BingSettings, GoogleSettin
 from pdf2zh_next.high_level import do_translate_async_stream
 
 from pdf2zh_engine.job import EngineJob
+
+
+def configure_babeldoc_asset_upstream() -> None:
+    preferred = os.getenv("PDF2ZH_ASSET_UPSTREAM", "").strip().lower()
+    if not preferred:
+        return
+
+    if preferred not in {"modelscope", "huggingface", "github"}:
+        return
+
+    try:
+        from babeldoc.assets import assets as babel_assets
+        from babeldoc.assets import embedding_assets_metadata as metadata
+    except Exception:
+        return
+
+    def keep_only(mapping: dict[str, Any], key: str) -> None:
+        if key not in mapping:
+            return
+        value = mapping[key]
+        mapping.clear()
+        mapping[key] = value
+
+    keep_only(metadata.FONT_METADATA_URL, preferred)
+    keep_only(metadata.FONT_URL_BY_UPSTREAM, preferred)
+    keep_only(metadata.DOC_LAYOUT_ONNX_MODEL_URL, preferred)
+    keep_only(metadata.TABLE_DETECTION_RAPIDOCR_MODEL_URL, preferred)
+
+    babel_assets._FASTEST_FONT_UPSTREAM = None
+    babel_assets._FASTEST_FONT_METADATA = None
 
 
 def _to_jsonable(obj: Any, _seen: set[int] | None = None) -> Any:
@@ -123,6 +154,7 @@ def build_settings(job: EngineJob) -> SettingsModel:
 async def run_job_stream(
     job: EngineJob, emit: Callable[[dict[str, Any]], None]
 ) -> None:
+    configure_babeldoc_asset_upstream()
     settings = build_settings(job)
 
     # do_translate_async_stream translates one file at a time.

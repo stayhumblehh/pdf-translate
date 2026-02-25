@@ -107,6 +107,24 @@ def watch_parent_process(
             return
 
 
+def restore_offline_assets(offline_assets_zip: str | None) -> None:
+    if not offline_assets_zip:
+        return
+    offline_assets_path = Path(offline_assets_zip)
+    if not offline_assets_path.exists():
+        LOGGER.warning("offline assets package not found: %s", offline_assets_path)
+        return
+    try:
+        from babeldoc.assets.assets import restore_offline_assets_package
+
+        restore_offline_assets_package(offline_assets_path)
+        LOGGER.info("offline assets restored from %s", offline_assets_path)
+    except BaseException as exc:
+        LOGGER.warning(
+            "restore offline assets failed, fallback to online download: %s", exc
+        )
+
+
 class JobState:
     def __init__(self) -> None:
         self.events: list[dict[str, Any]] = []
@@ -402,10 +420,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--ppid", type=int, default=0)
     parser.add_argument("--log-dir", type=str, default=None)
+    parser.add_argument("--offline-assets-zip", type=str, default=None)
     args = parser.parse_args(argv)
 
     log_dir = args.log_dir or os.getenv("PDF2ZH_LOG_DIR")
     setup_logging(log_dir)
+    restore_offline_assets(args.offline_assets_zip)
 
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     port = httpd.server_address[1]
