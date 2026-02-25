@@ -115,11 +115,20 @@ def restore_offline_assets(offline_assets_zip: str | None) -> None:
         LOGGER.warning("offline assets package not found: %s", offline_assets_path)
         return
     try:
+        from babeldoc.assets.assets import get_offline_assets_tag
         from babeldoc.assets.assets import restore_offline_assets_package
 
-        restore_offline_assets_package(offline_assets_path)
-        LOGGER.info("offline assets restored from %s", offline_assets_path)
-    except BaseException as exc:
+        expected_name = f"offline_assets_{get_offline_assets_tag()}.zip"
+        restore_path = offline_assets_path
+        if offline_assets_path.name != expected_name:
+            compatible_path = offline_assets_path.with_name(expected_name)
+            if not compatible_path.exists():
+                shutil.copyfile(offline_assets_path, compatible_path)
+            restore_path = compatible_path
+
+        restore_offline_assets_package(restore_path)
+        LOGGER.info("offline assets restored from %s", restore_path)
+    except Exception as exc:
         LOGGER.warning(
             "restore offline assets failed, fallback to online download: %s", exc
         )

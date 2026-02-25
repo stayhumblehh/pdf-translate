@@ -53,9 +53,11 @@ Copy-Item -Path $generatedOfflineAssets.FullName -Destination $offlineAssetsPath
   --onefile `
   --console `
   --collect-submodules pdf2zh_next.translator.translator_impl `
+  --collect-submodules tiktoken_ext `
   --collect-data pdf2zh_next `
   --collect-data babeldoc `
   --collect-data rapidocr_onnxruntime `
+  --hidden-import tiktoken_ext.openai_public `
   --hidden-import pdf2zh_next.translator.translator_impl.google `
   --hidden-import pdf2zh_next.translator.translator_impl.bing `
   --distpath $distPath `

@@ -1,6 +1,6 @@
 {
   "name": "pdf-translate",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "",
   "main": "apps/electron/main/index.js",
   "scripts": {
