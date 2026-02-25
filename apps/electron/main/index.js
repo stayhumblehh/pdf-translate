@@ -73,10 +73,20 @@ function extractPdfPathFromArgv(argv) {
   return null;
 }
 
+function sendToRenderer(channel, payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return false;
+  }
+  if (!mainWindow.webContents || mainWindow.webContents.isDestroyed()) {
+    return false;
+  }
+  mainWindow.webContents.send(channel, payload);
+  return true;
+}
+
 function pushOpenFileToRenderer(filePath) {
   if (!filePath) return;
-  if (mainWindow && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
-    mainWindow.webContents.send('pdf2zh:open-file', filePath);
+  if (sendToRenderer('pdf2zh:open-file', filePath)) {
     writeMainLog('info', `forwarded open-file to renderer: ${filePath}`);
     return;
   }
@@ -84,13 +94,11 @@ function pushOpenFileToRenderer(filePath) {
 }
 
 function sendEngineErrorToRenderer(message, detail) {
-  if (mainWindow && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
-    mainWindow.webContents.send('pdf2zh:error', {
-      jobId: null,
-      message,
-      detail
-    });
-  }
+  sendToRenderer('pdf2zh:error', {
+    jobId: null,
+    message,
+    detail
+  });
 }
 
 function isEngineHealthyPayload(payload) {
@@ -443,34 +451,34 @@ function openProgressStream(jobId) {
           const payload = JSON.parse(jsonStr);
           console.log(`[engine] event ${payload.type || 'unknown'}`, payload);
           if (payload.type === 'progress') {
-            mainWindow.webContents.send('pdf2zh:progress', { jobId, ...payload });
+            sendToRenderer('pdf2zh:progress', { jobId, ...payload });
           }
           if (payload.type === 'done') {
             fetchResultWithRetry(jobId)
               .then((result) => {
                 console.log(`[engine] result for ${jobId}`, result && result.ok);
                 if (result && result.ok) {
-                  mainWindow.webContents.send('pdf2zh:done', { jobId, ok: true, result });
+                  sendToRenderer('pdf2zh:done', { jobId, ok: true, result });
                 } else {
-                  mainWindow.webContents.send('pdf2zh:error', {
+                  sendToRenderer('pdf2zh:error', {
                     jobId,
                     message: result?.error || '引擎执行失败',
                     detail: result?.detail || ''
                   });
-                  mainWindow.webContents.send('pdf2zh:done', { jobId, ok: false });
+                  sendToRenderer('pdf2zh:done', { jobId, ok: false });
                 }
               })
               .catch((err) => {
-                mainWindow.webContents.send('pdf2zh:error', {
+                sendToRenderer('pdf2zh:error', {
                   jobId,
                   message: '获取结果失败',
                   detail: err.message
                 });
-                mainWindow.webContents.send('pdf2zh:done', { jobId, ok: false });
+                sendToRenderer('pdf2zh:done', { jobId, ok: false });
               });
           }
           if (payload.type === 'error') {
-            mainWindow.webContents.send('pdf2zh:error', { jobId, ...payload });
+            sendToRenderer('pdf2zh:error', { jobId, ...payload });
           }
         } catch {
           // ignore
@@ -480,7 +488,7 @@ function openProgressStream(jobId) {
   });
 
   req.on('error', (err) => {
-    mainWindow.webContents.send('pdf2zh:error', { jobId, message: err.message });
+    sendToRenderer('pdf2zh:error', { jobId, message: err.message });
   });
 
   req.end();
@@ -490,7 +498,7 @@ ipcMain.handle('start-translate', async (_event, params) => {
   const { filePath, service } = params;
 
   if (!filePath) {
-    mainWindow.webContents.send('pdf2zh:error', {
+    sendToRenderer('pdf2zh:error', {
       jobId: null,
       message: '未选择 PDF 文件'
     });
@@ -500,7 +508,7 @@ ipcMain.handle('start-translate', async (_event, params) => {
   await startEngineServer();
   if (service !== 'google' && service !== 'bing') {
     const message = `不支持的翻译服务: ${service}`;
-    mainWindow.webContents.send('pdf2zh:error', { jobId: null, message });
+    sendToRenderer('pdf2zh:error', { jobId: null, message });
     throw new Error(message);
   }
   const payload = {

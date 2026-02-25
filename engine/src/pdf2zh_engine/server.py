@@ -4,6 +4,7 @@ import argparse
 import base64
 import json
 import logging
+import multiprocessing
 import os
 import shutil
 import signal
@@ -366,6 +367,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main(argv: list[str] | None = None) -> int:
+    multiprocessing.freeze_support()
+
     parser = argparse.ArgumentParser(prog="pdf2zh-engine-server")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--ppid", type=int, default=0)
